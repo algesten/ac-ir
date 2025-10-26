@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io;
 use std::io::Error;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::time::Duration;
 use std::time::Instant;
 
@@ -22,11 +22,20 @@ type c_void = std::ffi::c_void;
 const GPIO_GET_LINEHANDLE_IOCTL: u32 = 0xc040b403;
 const GPIOHANDLE_SET_LINE_VALUES_IOCTL: u32 = 0xc040b409;
 
+// struct gpiohandle_request {
+//     __u32 lineoffsets[GPIOHANDLES_MAX];
+//     __u32 flags;
+//     __u8 default_values[GPIOHANDLES_MAX];
+//     char consumer_label[GPIO_MAX_NAME_SIZE];
+//     __u32 lines;
+//     int fd;
+// };
+
 #[repr(C)]
 struct GpioHandleRequest {
     lineoffsets: [u32; 64],
     flags: u32,
-    default_values: [u32; 64],
+    default_values: [u8; 64],
     consumer_label: [u8; 32],
     lines: u32,
     fd: i32,
@@ -70,9 +79,8 @@ struct PayloadFields {
 }
 
 fn set_line(fd: &File, value: u32, delay: Duration, target: &mut Instant) -> io::Result<()> {
-    let mut data = GpioHandleData {
-        values: [value; 64],
-    };
+    let mut data = GpioHandleData { values: [0; 64] };
+    data.values[0] = value;
 
     unsafe {
         if ioctl(
@@ -161,7 +169,7 @@ impl From<Settings> for Payload {
         // Calculate checksum
         let mut acc: u8 = 0;
         for i in 0..17 {
-            acc += unsafe { p.data[i] };
+            acc = acc.wrapping_add(unsafe { p.data[i] });
         }
         p.fields.checksum = acc;
 
@@ -174,13 +182,14 @@ pub fn send_settings(settings: impl Into<Payload>) -> io::Result<()> {
 
     // Request GPIO line
     let mut req = GpioHandleRequest {
-        lineoffsets: [4; 64],
-        default_values: [0; 64],
-        lines: 1,
+        lineoffsets: [0; 64],
         flags: 0x00000001, // GPIOHANDLE_REQUEST_OUTPUT
+        default_values: [0; 64],
         consumer_label: [0; 32],
+        lines: 1,
         fd: 0,
     };
+    req.lineoffsets[0] = 4;
 
     let consumer_label = b"AC\0";
     req.consumer_label[..consumer_label.len()].copy_from_slice(consumer_label);
@@ -196,7 +205,8 @@ pub fn send_settings(settings: impl Into<Payload>) -> io::Result<()> {
         }
     }
 
-    let line_fd = File::open(format!("/dev/gpiochip{}", req.fd))?;
+    // req.fd is the actual file descriptor for the GPIO line handle
+    let line_fd = unsafe { File::from_raw_fd(req.fd) };
 
     let p: Payload = settings.into();
 
